@@ -59,4 +59,15 @@ final class World
 
         $this->grid[$y][$x] = $type;
     }
+
+    /** @return array<string, mixed> */
+    public function toArray(): array
+    {
+        return [
+            'version' => 1,
+            'width' => $this->width,
+            'height' => $this->height,
+            'grid' => $this->grid
+        ];
+    }
 }
