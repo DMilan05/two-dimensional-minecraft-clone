@@ -2,14 +2,17 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../../vendor/autoload.php';
+use Voxel\GameRules;
 
-use Voxel\World;
-use Voxel\WorldGenerator;
+$context = require __DIR__ . '/bootstrap.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
-$world = new World(64, 32);
-(new WorldGenerator())->generate($world);
+$world = $context['worldProvider']->loadOrCreate();
+$player = $context['playerProvider']->loadOrCreate($world);
 
-echo json_encode($world->toArray());
+echo json_encode([
+    'world' => $world->toArray(),
+    'player' => $player->toArray(),
+    'rules' => GameRules::toArray(),
+], JSON_THROW_ON_ERROR);

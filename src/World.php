@@ -7,6 +7,7 @@ use InvalidArgumentException;
 
 final class World
 {
+    public const FORMAT_VERSION = 1;
     private int $width;
     private int $height;
 
