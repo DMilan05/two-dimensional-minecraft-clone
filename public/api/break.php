@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Voxel\BlockType;
+use Voxel\World;
 
 $context = require __DIR__ . '/bootstrap.php';
 
@@ -22,15 +23,30 @@ if (!$player->canReach($x, $y)) {
     respond(409, ['error' => 'Ez a blokk túl messze van.']);
 }
 
-if (!$world->getBlock($x, $y)->isBreakable()) {
+$target = $world->getBlock($x, $y);
+
+if (!$target->isBreakable()) {
     respond(409, ['error' => 'Itt nincs mit kibontani.']);
 }
 
+$changes = [];
+
+// A door is one object spread over two cells: breaking either half removes
+// both, otherwise a stray half would be left floating.
+if ($target->isDoor()) {
+    $otherY = $target->isDoorBottom() ? $y - 1 : $y + 1;
+
+    if ($world->isInBounds($x, $otherY) && $world->getBlock($x, $otherY)->isDoor()) {
+        $world->setBlock($x, $otherY, BlockType::Air);
+        $changes[] = ['x' => $x, 'y' => $otherY, 'type' => BlockType::Air->value];
+    }
+}
+
 $world->setBlock($x, $y, BlockType::Air);
+$changes[] = ['x' => $x, 'y' => $y, 'type' => BlockType::Air->value];
+
+$changes = array_merge($changes, $context['fallingBlocks']->settleColumn($world, $x));
+
 $context['worldRepository']->save($world);
 
-respond(200, [
-    'x' => $x,
-    'y' => $y,
-    'type' => BlockType::Air->value,
-]);
+respond(200, ['changes' => $changes]);

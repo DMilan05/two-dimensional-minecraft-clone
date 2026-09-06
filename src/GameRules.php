@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace Voxel;
 
 /**
- * Rules both the server and the browser need to agree on. They are sent to the
- * client with the world state so the two never drift apart.
+ * Rules both the server and the browser need to agree on. Sending the type
+ * lists along with the world means the browser never has to keep its own copy
+ * of which blocks are solid - one source of truth, in the enum.
  */
 final class GameRules
 {
@@ -28,10 +29,25 @@ final class GameRules
      */
     public static function toArray(): array
     {
+        $nonSolid = [];
+        $doors = [];
+
+        foreach (BlockType::cases() as $type) {
+            if (!$type->isSolid()) {
+                $nonSolid[] = $type->value;
+            }
+
+            if ($type->isDoor()) {
+                $doors[] = $type->value;
+            }
+        }
+
         return [
             'reach' => self::REACH,
             'playerWidth' => self::PLAYER_WIDTH,
             'playerHeight' => self::PLAYER_HEIGHT,
+            'nonSolidTypes' => $nonSolid,
+            'doorTypes' => $doors,
         ];
     }
 }

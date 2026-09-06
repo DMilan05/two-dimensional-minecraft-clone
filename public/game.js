@@ -5,6 +5,14 @@ const BlockType = {
     Dirt: 1,
     Stone: 2,
     Grass: 3,
+    Sand: 4,
+    Wood: 5,
+    Leaves: 6,
+    Bedrock: 7,
+    DoorClosedBottom: 8,
+    DoorClosedTop: 9,
+    DoorOpenBottom: 10,
+    DoorOpenTop: 11,
 };
 
 const COLORS = {
@@ -12,6 +20,14 @@ const COLORS = {
     [BlockType.Dirt]: '#5f4c3d',
     [BlockType.Stone]: '#42494a',
     [BlockType.Grass]: '#4a913f',
+    [BlockType.Sand]: '#d8c48f',
+    [BlockType.Wood]: '#6b4a2b',
+    [BlockType.Leaves]: '#347a2b',
+    [BlockType.Bedrock]: '#1b1d1f',
+    [BlockType.DoorClosedBottom]: '#8a5a2b',
+    [BlockType.DoorClosedTop]: '#8a5a2b',
+    [BlockType.DoorOpenBottom]: '#8a5a2b',
+    [BlockType.DoorOpenTop]: '#8a5a2b',
 };
 
 const SKY_COLOR = COLORS[BlockType.Air];
@@ -20,13 +36,25 @@ const BLOCK_NAMES = {
     [BlockType.Dirt]: 'Föld',
     [BlockType.Stone]: 'Kő',
     [BlockType.Grass]: 'Fű',
+    [BlockType.Sand]: 'Homok',
+    [BlockType.Wood]: 'Fa',
+    [BlockType.Leaves]: 'Levél',
+    [BlockType.DoorClosedBottom]: 'Ajtó',
 };
 
-const HOTBAR = {
-    '1': BlockType.Dirt,
-    '2': BlockType.Stone,
-    '3': BlockType.Grass,
-};
+/** Slots in the order they appear on screen; the index is the number key. */
+const HOTBAR_SLOTS = [
+    BlockType.Dirt,
+    BlockType.Stone,
+    BlockType.Grass,
+    BlockType.Sand,
+    BlockType.Wood,
+    BlockType.Leaves,
+    BlockType.DoorClosedBottom,
+];
+
+const HOTBAR_SLOT_SIZE = 34;
+const HOTBAR_PADDING = 8;
 
 // Physics, expressed in blocks and seconds so the numbers stay readable.
 const MOVE_SPEED = 7;
@@ -54,6 +82,13 @@ let lastSyncedAt = 0;
 let syncInFlight = null;
 
 /**
+ * Which types are passable and which are doors comes from the server, so the
+ * enum stays the single source of truth for both sides.
+ */
+let nonSolidTypes = new Set([BlockType.Air]);
+let doorTypes = new Set();
+
+/**
  * Top-left corner of the visible area, in whole pixels. Keeping it integral
  * means every block lands on an exact pixel boundary, with no seams between
  * neighbouring rectangles.
@@ -79,7 +114,7 @@ function blockTypeAt(x, y) {
 }
 
 function isSolidAt(x, y) {
-    return blockTypeAt(x, y) !== BlockType.Air;
+    return !nonSolidTypes.has(blockTypeAt(x, y));
 }
 
 /**
@@ -195,6 +230,31 @@ function updateCamera() {
  * Drawing
  * ------------------------------------------------------------------ */
 
+/**
+ * A closed door fills its cell; an open one is drawn as a narrow panel swung
+ * to the side, so you can see at a glance whether you can walk through.
+ */
+function drawDoor(type, screenX, screenY) {
+    const open = type === BlockType.DoorOpenBottom || type === BlockType.DoorOpenTop;
+    const width = open ? BLOCK_SIZE : BLOCK_SIZE / 4;
+
+    ctx.fillStyle = COLORS[type];
+    ctx.fillRect(screenX, screenY, width, BLOCK_SIZE);
+
+    if (!open) {
+        return;
+    }
+
+    ctx.strokeStyle = '#5c3a1a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(screenX + 0.5, screenY + 0.5, BLOCK_SIZE - 1, BLOCK_SIZE - 1);
+
+    if (type === BlockType.DoorOpenBottom) {
+        ctx.fillStyle = '#e0c060';
+        ctx.fillRect(screenX + BLOCK_SIZE - 5, screenY + 4, 2, 2);
+    }
+}
+
 function drawWorld() {
     // The sky fills the canvas first, so air blocks need no rectangle of their
     // own - which is most of the screen above ground.
@@ -214,13 +274,16 @@ function drawWorld() {
                 continue;
             }
 
+            const screenX = x * BLOCK_SIZE - camera.pixelX;
+            const screenY = y * BLOCK_SIZE - camera.pixelY;
+
+            if (doorTypes.has(type)) {
+                drawDoor(type, screenX, screenY);
+                continue;
+            }
+
             ctx.fillStyle = COLORS[type];
-            ctx.fillRect(
-                x * BLOCK_SIZE - camera.pixelX,
-                y * BLOCK_SIZE - camera.pixelY,
-                BLOCK_SIZE,
-                BLOCK_SIZE,
-            );
+            ctx.fillRect(screenX, screenY, BLOCK_SIZE, BLOCK_SIZE);
         }
     }
 }
@@ -253,10 +316,46 @@ function drawCursor() {
     );
 }
 
+/**
+ * A row of coloured slots along the bottom of the canvas. Drawn last so it
+ * always sits on top of the world.
+ */
+function drawHotbar() {
+    const totalWidth = HOTBAR_SLOTS.length * (HOTBAR_SLOT_SIZE + HOTBAR_PADDING) - HOTBAR_PADDING;
+    const startX = HOTBAR_PADDING;
+    const startY = canvas.height - HOTBAR_SLOT_SIZE - HOTBAR_PADDING;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.fillRect(
+        startX - HOTBAR_PADDING / 2,
+        startY - HOTBAR_PADDING / 2,
+        totalWidth + HOTBAR_PADDING,
+        HOTBAR_SLOT_SIZE + HOTBAR_PADDING,
+    );
+
+    ctx.font = '11px sans-serif';
+    ctx.textBaseline = 'top';
+
+    HOTBAR_SLOTS.forEach((type, index) => {
+        const x = startX + index * (HOTBAR_SLOT_SIZE + HOTBAR_PADDING);
+
+        ctx.fillStyle = COLORS[type];
+        ctx.fillRect(x, startY, HOTBAR_SLOT_SIZE, HOTBAR_SLOT_SIZE);
+
+        ctx.strokeStyle = type === selectedType ? '#ffffff' : 'rgba(0, 0, 0, 0.6)';
+        ctx.lineWidth = type === selectedType ? 3 : 1;
+        ctx.strokeRect(x + 0.5, startY + 0.5, HOTBAR_SLOT_SIZE - 1, HOTBAR_SLOT_SIZE - 1);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(String(index + 1), x + 3, startY + 2);
+    });
+}
+
 function render() {
     drawWorld();
     drawPlayer();
     drawCursor();
+    drawHotbar();
 }
 
 /* ------------------------------------------------------------------ *
@@ -330,7 +429,12 @@ async function sendAction(endpoint, payload) {
             return;
         }
 
-        state.world.grid[data.y][data.x] = data.type;
+        // One action can change several cells: a door is two, and falling sand
+        // is a pair of cells per block that moved.
+        data.changes.forEach((change) => {
+            state.world.grid[change.y][change.x] = change.type;
+        });
+
         showSelection();
     } catch (error) {
         showStatus('Nem sikerült elérni a szervert.');
@@ -377,6 +481,13 @@ canvas.addEventListener('contextmenu', (event) => {
     event.preventDefault();
 
     const { x, y } = blockAt(event);
+
+    // Right-clicking a door opens or closes it instead of placing a block.
+    if (doorTypes.has(blockTypeAt(x, y))) {
+        sendAction('interact', { x, y });
+        return;
+    }
+
     sendAction('place', { x, y, type: selectedType });
 });
 
@@ -385,8 +496,10 @@ window.addEventListener('keydown', (event) => {
 
     pressedKeys.add(key);
 
-    if (HOTBAR[key] !== undefined) {
-        selectedType = HOTBAR[key];
+    const slot = Number(key);
+
+    if (Number.isInteger(slot) && slot >= 1 && slot <= HOTBAR_SLOTS.length) {
+        selectedType = HOTBAR_SLOTS[slot - 1];
         showSelection();
     }
 
@@ -426,6 +539,9 @@ fetch('api/world.php')
     .then((response) => response.json())
     .then((data) => {
         state = data;
+        nonSolidTypes = new Set(data.rules.nonSolidTypes);
+        doorTypes = new Set(data.rules.doorTypes);
+
         player = {
             x: data.player.x,
             y: data.player.y,

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Voxel\FallingBlocks;
 use Voxel\PlayerProvider;
 use Voxel\PlayerRepository;
 use Voxel\WorldGenerator;
@@ -86,6 +87,7 @@ $playerRepository = new PlayerRepository(DATA_DIR . '/player.json');
 $playerProvider = new PlayerProvider($playerRepository);
 
 return [
+    'fallingBlocks' => new FallingBlocks(),
     'worldRepository' => $worldRepository,
     'worldProvider' => $worldProvider,
     'playerRepository' => $playerRepository,
