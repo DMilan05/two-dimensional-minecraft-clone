@@ -18,16 +18,34 @@ final class WorldProvider
     ) {
     }
 
+    /** @var int[]|null the surface line of the world last loaded or created */
+    private ?array $surfaceLine = null;
+
     public function loadOrCreate(): World
     {
         if ($this->repository->exists()) {
-            return $this->repository->load();
+            $world = $this->repository->load();
+            $this->surfaceLine = $this->repository->loadSurfaceLine($world);
+
+            return $world;
         }
 
         $world = new World($this->width, $this->height);
-        $this->generator->generate($world);
-        $this->repository->save($world);
+        $this->surfaceLine = $this->generator->generate($world);
+
+        // A brand new world has no chunks on disk yet, so all of them go out.
+        $this->repository->saveAll($world, $this->surfaceLine);
 
         return $world;
+    }
+
+    /**
+     * Only meaningful after loadOrCreate().
+     *
+     * @return int[]
+     */
+    public function getSurfaceLine(): array
+    {
+        return $this->surfaceLine ?? [];
     }
 }

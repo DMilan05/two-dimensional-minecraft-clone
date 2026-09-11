@@ -54,14 +54,33 @@ foreach ($cells as [$cellX, $cellY]) {
     if ($world->getBlock($cellX, $cellY) !== BlockType::Air) {
         respond(409, ['error' => 'Itt már van blokk.']);
     }
+}
 
-    if ($player->occupies($cellX, $cellY)) {
+// Placing a block into the player's own space is allowed in one case: a single
+// block right under the feet, with room to step up onto it. That is how you
+// pillar out of a hole.
+$liftPlayer = false;
+
+foreach ($cells as [$cellX, $cellY]) {
+    if (!$player->occupies($cellX, $cellY)) {
+        continue;
+    }
+
+    if (count($cells) > 1 || !canStepUp($world, $player, $cellX, $cellY)) {
         respond(409, ['error' => 'Ide nem rakhatsz, mert te állsz ott.']);
     }
+
+    $liftPlayer = true;
 }
 
 if (!hasSupport($world, $x, $y)) {
     respond(409, ['error' => 'Blokkot csak meglévő blokk mellé lehet rakni.']);
+}
+
+// In survival the block has to come out of the inventory. The check and the
+// deduction are the same call, so there is no way to place without paying.
+if (!$player->getMode()->isCreative() && !$player->getInventory()->remove($type)) {
+    respond(409, ['error' => 'Nincs több ilyen blokkod.']);
 }
 
 $changes = [];
@@ -75,11 +94,48 @@ if ($type->isDoorBottom()) {
     $changes[] = ['x' => $x, 'y' => $y - 1, 'type' => $upper->value];
 }
 
+if ($liftPlayer) {
+    $player->standOn($y);
+}
+
 $changes = array_merge($changes, $context['fallingBlocks']->settleColumn($world, $x));
 
-$context['worldRepository']->save($world);
+$context['worldRepository']->saveChanges($world, $changes);
+$context['playerRepository']->save($player);
 
-respond(200, ['changes' => $changes]);
+respond(200, [
+    'changes' => $changes,
+    'inventory' => $player->getInventory()->toArray(),
+    'mode' => $player->getMode()->value,
+    // Sent back only when the player was pushed up, so the browser can move
+    // its simulated player to the same place.
+    'playerY' => $liftPlayer ? $player->getY() : null,
+]);
+
+/**
+ * Whether the player can be lifted onto a block placed at the given cell.
+ *
+ * Two conditions: the block has to be at the player's feet rather than at head
+ * height, and the space the player would move into has to be clear.
+ */
+function canStepUp(World $world, Player $player, int $x, int $y): bool
+{
+    $feetY = (int) floor($player->getY() + GameRules::PLAYER_HEIGHT - 0.0001);
+
+    if ($y !== $feetY) {
+        return false;
+    }
+
+    $headroomTop = (int) floor($y - GameRules::PLAYER_HEIGHT);
+
+    for ($checkY = $headroomTop; $checkY < $y; $checkY++) {
+        if ($world->getBlock($x, $checkY)->isSolid()) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 /**
  * A new block needs something to attach to. With ALLOW_SIDEWAYS_PLACEMENT any

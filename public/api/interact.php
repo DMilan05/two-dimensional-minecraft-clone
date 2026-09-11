@@ -57,6 +57,10 @@ $changes = [
 
 $changes = array_merge($changes, $context['fallingBlocks']->settleColumn($world, $x));
 
-$context['worldRepository']->save($world);
+$context['worldRepository']->saveChanges($world, $changes);
 
-respond(200, ['changes' => $changes]);
+respond(200, [
+    'changes' => $changes,
+    'inventory' => $player->getInventory()->toArray(),
+    'mode' => $player->getMode()->value,
+]);

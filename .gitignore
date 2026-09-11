@@ -1,2 +1,9 @@
+# Composer
 /vendor/
-/data/*.json
+
+# Saved worlds and player state
+/data/
+
+# IDE
+/.idea/workspace.xml
+/.idea/shelf/

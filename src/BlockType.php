@@ -23,15 +23,36 @@ enum BlockType: int
     case DoorClosedTop = 9;
     case DoorOpenBottom = 10;
     case DoorOpenTop = 11;
+    case Torch = 12;
 
     /**
-     * Whether the block stops movement. An open door does not.
+     * Whether the block stops movement. An open door and a torch do not.
      */
     public function isSolid(): bool
     {
         return match ($this) {
-            self::Air, self::DoorOpenBottom, self::DoorOpenTop => false,
+            self::Air, self::DoorOpenBottom, self::DoorOpenTop, self::Torch => false,
             default => true,
+        };
+    }
+
+    /**
+     * Whether light passes through. Anything you can walk through, light can
+     * travel through too - which keeps the two rules from drifting apart.
+     */
+    public function isTransparent(): bool
+    {
+        return !$this->isSolid();
+    }
+
+    /**
+     * How much light the block gives off, on the 0-15 scale.
+     */
+    public function lightEmission(): int
+    {
+        return match ($this) {
+            self::Torch => 14,
+            default => 0,
         };
     }
 
@@ -66,6 +87,21 @@ enum BlockType: int
     public function hasGravity(): bool
     {
         return $this === self::Sand;
+    }
+
+    /**
+     * What the player collects when this block is broken, or null when it
+     * yields nothing. Grass turns into dirt, leaves vanish, and either half of
+     * a door gives back one door.
+     */
+    public function drop(): ?self
+    {
+        return match ($this) {
+            self::Air, self::Bedrock, self::Leaves => null,
+            self::Grass => self::Dirt,
+            self::DoorClosedTop, self::DoorOpenTop, self::DoorOpenBottom => self::DoorClosedBottom,
+            default => $this,
+        };
     }
 
     public function isDoor(): bool

@@ -13,6 +13,7 @@ const BlockType = {
     DoorClosedTop: 9,
     DoorOpenBottom: 10,
     DoorOpenTop: 11,
+    Torch: 12,
 };
 
 const COLORS = {
@@ -28,9 +29,18 @@ const COLORS = {
     [BlockType.DoorClosedTop]: '#8a5a2b',
     [BlockType.DoorOpenBottom]: '#8a5a2b',
     [BlockType.DoorOpenTop]: '#8a5a2b',
+    [BlockType.Torch]: '#f5c451',
 };
 
 const SKY_COLOR = COLORS[BlockType.Air];
+
+/**
+ * What you see through an air cell that is not open to the sky: the far wall
+ * of the cave rather than the sky itself.
+ */
+const CAVE_BACKGROUND = 'cave';
+
+COLORS[CAVE_BACKGROUND] = '#3a2e26';
 
 const BLOCK_NAMES = {
     [BlockType.Dirt]: 'Föld',
@@ -40,6 +50,7 @@ const BLOCK_NAMES = {
     [BlockType.Wood]: 'Fa',
     [BlockType.Leaves]: 'Levél',
     [BlockType.DoorClosedBottom]: 'Ajtó',
+    [BlockType.Torch]: 'Fáklya',
 };
 
 /** Slots in the order they appear on screen; the index is the number key. */
@@ -51,6 +62,7 @@ const HOTBAR_SLOTS = [
     BlockType.Wood,
     BlockType.Leaves,
     BlockType.DoorClosedBottom,
+    BlockType.Torch,
 ];
 
 const HOTBAR_SLOT_SIZE = 34;
@@ -60,6 +72,7 @@ const HOTBAR_PADDING = 8;
 const MOVE_SPEED = 7;
 const JUMP_SPEED = 11.5;
 const GRAVITY = 34;
+const FLY_SPEED = 9;
 const TERMINAL_VELOCITY = 30;
 const EPSILON = 0.0001;
 
@@ -82,11 +95,35 @@ let lastSyncedAt = 0;
 let syncInFlight = null;
 
 /**
- * Which types are passable and which are doors comes from the server, so the
- * enum stays the single source of truth for both sides.
+ * Which types are passable, transparent, doors, or light sources all come from
+ * the server, so the enum stays the single source of truth for both sides.
  */
 let nonSolidTypes = new Set([BlockType.Air]);
+let transparentTypes = new Set([BlockType.Air]);
 let doorTypes = new Set();
+let lightEmission = {};
+
+/** Block type value => how many the player carries. Ignored in creative. */
+let inventory = {};
+let gameMode = 'survival';
+
+/**
+ * Two separate light channels, as in Minecraft. Sunlight fades at night;
+ * torchlight does not. Keeping them apart means the day-night cycle needs no
+ * recomputation - only the final brightness per cell changes.
+ */
+let skyLight = null;
+let blockLight = null;
+
+/**
+ * Where the ground was when the world was generated. Digging does not move it,
+ * which is exactly why the background needs it: sunlight reaches straight down
+ * a freshly dug shaft, but you are still underground.
+ */
+let surfaceLine = [];
+
+/** COLORS scaled to every light level, built once to avoid per-frame work. */
+let shadeCache = {};
 
 /**
  * Top-left corner of the visible area, in whole pixels. Keeping it integral
@@ -138,22 +175,179 @@ function playerCollides() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Lighting
+ * ------------------------------------------------------------------ */
+
+/**
+ * Spreads light outwards from the cells already in the queue. Each step costs
+ * one light level, so a source of 15 reaches 15 blocks at most.
+ *
+ * An opaque block is lit by its neighbours - otherwise every wall would be a
+ * black silhouette - but it does not pass light on.
+ */
+function spreadLight(map, queue) {
+    const width = state.world.width;
+    const height = state.world.height;
+
+    let head = 0;
+
+    while (head < queue.length) {
+        const index = queue[head];
+        head++;
+
+        const level = map[index];
+
+        if (level <= 1) {
+            continue;
+        }
+
+        const x = index % width;
+        const y = (index - x) / width;
+        const next = level - 1;
+
+        const neighbours = [
+            [x - 1, y],
+            [x + 1, y],
+            [x, y - 1],
+            [x, y + 1],
+        ];
+
+        for (const [nx, ny] of neighbours) {
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+                continue;
+            }
+
+            const neighbourIndex = ny * width + nx;
+
+            if (map[neighbourIndex] >= next) {
+                continue;
+            }
+
+            map[neighbourIndex] = next;
+
+            if (transparentTypes.has(state.world.grid[ny][nx])) {
+                queue.push(neighbourIndex);
+            }
+        }
+    }
+}
+
+/**
+ * Rebuilds both light maps from scratch. Cheap enough to run after every
+ * change: a few tens of thousands of cells is nothing for a flood fill.
+ */
+function computeLight() {
+    const width = state.world.width;
+    const height = state.world.height;
+    const max = state.rules.maxLightLevel;
+
+    skyLight = new Uint8Array(width * height);
+    blockLight = new Uint8Array(width * height);
+
+    const skyQueue = [];
+    const blockQueue = [];
+
+    for (let x = 0; x < width; x++) {
+        // Sunlight falls straight down until something opaque stops it.
+        for (let y = 0; y < height; y++) {
+            if (!transparentTypes.has(state.world.grid[y][x])) {
+                break;
+            }
+
+            const index = y * width + x;
+            skyLight[index] = max;
+            skyQueue.push(index);
+        }
+    }
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const emission = lightEmission[state.world.grid[y][x]];
+
+            if (emission === undefined) {
+                continue;
+            }
+
+            const index = y * width + x;
+            blockLight[index] = emission;
+            blockQueue.push(index);
+        }
+    }
+
+    spreadLight(skyLight, skyQueue);
+    spreadLight(blockLight, blockQueue);
+}
+
+/**
+ * How bright the sun is right now, between nightBrightness and 1.
+ */
+function daylightFactor(timestamp) {
+    const cycle = (timestamp / 1000) % state.rules.dayLengthSeconds;
+    const phase = cycle / state.rules.dayLengthSeconds;
+
+    // Shifted so the cycle starts at noon rather than at dawn.
+    const sun = (Math.sin(phase * Math.PI * 2 + Math.PI / 2) + 1) / 2;
+
+    return state.rules.nightBrightness + (1 - state.rules.nightBrightness) * sun;
+}
+
+function lightLevelAt(x, y, daylight) {
+    const index = y * state.world.width + x;
+
+    return Math.round(Math.max(blockLight[index], skyLight[index] * daylight));
+}
+
+/**
+ * Pre-multiplies every block colour by every light level, so drawing only ever
+ * looks a string up instead of building one per cell per frame.
+ */
+function buildShadeCache() {
+    const max = state.rules.maxLightLevel;
+    const floor = state.rules.minBrightness;
+
+    shadeCache = {};
+
+    for (const [type, hex] of Object.entries(COLORS)) {
+        const red = parseInt(hex.slice(1, 3), 16);
+        const green = parseInt(hex.slice(3, 5), 16);
+        const blue = parseInt(hex.slice(5, 7), 16);
+
+        shadeCache[type] = [];
+
+        for (let level = 0; level <= max; level++) {
+            const brightness = Math.max(floor, level / max);
+
+            shadeCache[type].push(
+                `rgb(${Math.round(red * brightness)}, ${Math.round(green * brightness)}, ${Math.round(blue * brightness)})`,
+            );
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * Physics
  * ------------------------------------------------------------------ */
 
 function updatePhysics(dt) {
     const left = pressedKeys.has('a') || pressedKeys.has('arrowleft');
     const right = pressedKeys.has('d') || pressedKeys.has('arrowright');
-    const jump = pressedKeys.has('w') || pressedKeys.has(' ') || pressedKeys.has('arrowup');
+    const up = pressedKeys.has('w') || pressedKeys.has(' ') || pressedKeys.has('arrowup');
+    const down = pressedKeys.has('s') || pressedKeys.has('arrowdown');
 
     player.vx = (Number(right) - Number(left)) * MOVE_SPEED;
 
-    if (jump && player.onGround) {
-        player.vy = -JUMP_SPEED;
-        player.onGround = false;
-    }
+    if (gameMode === 'creative') {
+        // No gravity while flying: vertical speed comes straight from the keys,
+        // and stays at zero when neither is held.
+        player.vy = (Number(down) - Number(up)) * FLY_SPEED;
+    } else {
+        if (up && player.onGround) {
+            player.vy = -JUMP_SPEED;
+            player.onGround = false;
+        }
 
-    player.vy = Math.min(player.vy + GRAVITY * dt, TERMINAL_VELOCITY);
+        player.vy = Math.min(player.vy + GRAVITY * dt, TERMINAL_VELOCITY);
+    }
 
     moveHorizontally(player.vx * dt);
     moveVertically(player.vy * dt);
@@ -234,11 +428,11 @@ function updateCamera() {
  * A closed door fills its cell; an open one is drawn as a narrow panel swung
  * to the side, so you can see at a glance whether you can walk through.
  */
-function drawDoor(type, screenX, screenY) {
+function drawDoor(type, screenX, screenY, colour) {
     const open = type === BlockType.DoorOpenBottom || type === BlockType.DoorOpenTop;
     const width = open ? BLOCK_SIZE : BLOCK_SIZE / 4;
 
-    ctx.fillStyle = COLORS[type];
+    ctx.fillStyle = colour;
     ctx.fillRect(screenX, screenY, width, BLOCK_SIZE);
 
     if (!open) {
@@ -255,10 +449,39 @@ function drawDoor(type, screenX, screenY) {
     }
 }
 
-function drawWorld() {
-    // The sky fills the canvas first, so air blocks need no rectangle of their
-    // own - which is most of the screen above ground.
-    ctx.fillStyle = SKY_COLOR;
+/**
+ * A torch lights itself, so it is drawn at full brightness regardless of the
+ * surrounding light level.
+ */
+function drawTorch(screenX, screenY) {
+    ctx.fillStyle = '#6b4a2b';
+    ctx.fillRect(screenX + BLOCK_SIZE / 2 - 1, screenY + 5, 2, BLOCK_SIZE - 5);
+
+    ctx.fillStyle = COLORS[BlockType.Torch];
+    ctx.fillRect(screenX + BLOCK_SIZE / 2 - 2, screenY + 2, 4, 4);
+}
+
+/**
+ * Whether an air cell shows sky rather than the inside of a wall.
+ *
+ * Two conditions, and both are needed. Above the original ground line rules
+ * out caves and dug shafts. Some sunlight reaching the cell rules out sealed
+ * rooms - and, because sunlight also spreads sideways, it still counts the air
+ * under a tree as outdoors.
+ */
+function isOutdoors(x, y) {
+    if (surfaceLine.length === 0) {
+        return true;
+    }
+
+    return y < surfaceLine[x] && skyLight[y * state.world.width + x] > 0;
+}
+
+function drawWorld(daylight) {
+    // The sky itself dims at night, otherwise the horizon would stay bright
+    // while everything below it went dark.
+    const skyBrightness = Math.max(state.rules.minBrightness, daylight);
+    ctx.fillStyle = shadeCache[BlockType.Air][Math.round(skyBrightness * state.rules.maxLightLevel)];
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     const firstX = Math.max(0, Math.floor(camera.pixelX / BLOCK_SIZE));
@@ -269,35 +492,54 @@ function drawWorld() {
     for (let y = firstY; y <= lastY; y++) {
         for (let x = firstX; x <= lastX; x++) {
             const type = state.world.grid[y][x];
-
-            if (type === BlockType.Air) {
-                continue;
-            }
-
             const screenX = x * BLOCK_SIZE - camera.pixelX;
             const screenY = y * BLOCK_SIZE - camera.pixelY;
 
-            if (doorTypes.has(type)) {
-                drawDoor(type, screenX, screenY);
+            if (type === BlockType.Air) {
+                if (isOutdoors(x, y)) {
+                    // The background fill already painted the sky here.
+                    continue;
+                }
+
+                ctx.fillStyle = shadeCache[CAVE_BACKGROUND][lightLevelAt(x, y, daylight)];
+                ctx.fillRect(screenX, screenY, BLOCK_SIZE, BLOCK_SIZE);
                 continue;
             }
 
-            ctx.fillStyle = COLORS[type];
+            if (type === BlockType.Torch) {
+                drawTorch(screenX, screenY);
+                continue;
+            }
+
+            const colour = shadeCache[type][lightLevelAt(x, y, daylight)];
+
+            if (doorTypes.has(type)) {
+                drawDoor(type, screenX, screenY, colour);
+                continue;
+            }
+
+            ctx.fillStyle = colour;
             ctx.fillRect(screenX, screenY, BLOCK_SIZE, BLOCK_SIZE);
         }
     }
 }
 
-function drawPlayer() {
+function drawPlayer(daylight) {
     const width = state.rules.playerWidth * BLOCK_SIZE;
     const height = state.rules.playerHeight * BLOCK_SIZE;
     const screenX = player.x * BLOCK_SIZE - camera.pixelX;
     const screenY = player.y * BLOCK_SIZE - camera.pixelY;
 
-    ctx.fillStyle = '#2f3640';
+    // The player is lit by whatever cell its head is in.
+    const headX = clamp(Math.floor(player.x), 0, state.world.width - 1);
+    const headY = clamp(Math.floor(player.y), 0, state.world.height - 1);
+    const level = lightLevelAt(headX, headY, daylight);
+    const brightness = Math.max(state.rules.minBrightness, level / state.rules.maxLightLevel);
+
+    ctx.fillStyle = `rgb(${Math.round(47 * brightness)}, ${Math.round(54 * brightness)}, ${Math.round(64 * brightness)})`;
     ctx.fillRect(screenX, screenY + height * 0.35, width, height * 0.65);
 
-    ctx.fillStyle = '#e8b07a';
+    ctx.fillStyle = `rgb(${Math.round(232 * brightness)}, ${Math.round(176 * brightness)}, ${Math.round(122 * brightness)})`;
     ctx.fillRect(screenX, screenY, width, height * 0.35);
 }
 
@@ -336,11 +578,18 @@ function drawHotbar() {
     ctx.font = '11px sans-serif';
     ctx.textBaseline = 'top';
 
+    const creative = gameMode === 'creative';
+
     HOTBAR_SLOTS.forEach((type, index) => {
         const x = startX + index * (HOTBAR_SLOT_SIZE + HOTBAR_PADDING);
+        const count = inventory[type] ?? 0;
+        const usable = creative || count > 0;
 
+        // An empty slot is drawn faded, so it is obvious why placing fails.
+        ctx.globalAlpha = usable ? 1 : 0.3;
         ctx.fillStyle = COLORS[type];
         ctx.fillRect(x, startY, HOTBAR_SLOT_SIZE, HOTBAR_SLOT_SIZE);
+        ctx.globalAlpha = 1;
 
         ctx.strokeStyle = type === selectedType ? '#ffffff' : 'rgba(0, 0, 0, 0.6)';
         ctx.lineWidth = type === selectedType ? 3 : 1;
@@ -348,12 +597,18 @@ function drawHotbar() {
 
         ctx.fillStyle = '#ffffff';
         ctx.fillText(String(index + 1), x + 3, startY + 2);
+
+        if (!creative) {
+            ctx.textAlign = 'right';
+            ctx.fillText(String(count), x + HOTBAR_SLOT_SIZE - 3, startY + HOTBAR_SLOT_SIZE - 13);
+            ctx.textAlign = 'left';
+        }
     });
 }
 
-function render() {
-    drawWorld();
-    drawPlayer();
+function render(daylight) {
+    drawWorld(daylight);
+    drawPlayer(daylight);
     drawCursor();
     drawHotbar();
 }
@@ -381,7 +636,9 @@ function showStatus(message) {
 }
 
 function showSelection() {
-    showStatus(`Kiválasztott blokk: ${BLOCK_NAMES[selectedType]}`);
+    const modeLabel = gameMode === 'creative' ? 'Kreatív' : 'Túlélő';
+
+    showStatus(`Mód: ${modeLabel} · Kiválasztott blokk: ${BLOCK_NAMES[selectedType]}`);
 }
 
 /**
@@ -434,6 +691,26 @@ async function sendAction(endpoint, payload) {
         data.changes.forEach((change) => {
             state.world.grid[change.y][change.x] = change.type;
         });
+
+        if (data.changes.length > 0) {
+            computeLight();
+        }
+
+        if (data.inventory !== undefined) {
+            inventory = data.inventory;
+        }
+
+        if (data.mode !== undefined) {
+            gameMode = data.mode;
+        }
+
+        // Placing a block under your own feet lifts you onto it; the server
+        // works out the new height so both sides agree on where you are.
+        if (data.playerY !== undefined && data.playerY !== null) {
+            player.y = data.playerY;
+            player.vy = 0;
+            player.onGround = true;
+        }
 
         showSelection();
     } catch (error) {
@@ -503,6 +780,10 @@ window.addEventListener('keydown', (event) => {
         showSelection();
     }
 
+    if (key === 'g') {
+        sendAction('mode', {});
+    }
+
     // Stop the page from scrolling while playing.
     if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
         event.preventDefault();
@@ -526,7 +807,7 @@ function loop(timestamp) {
 
     updatePhysics(dt);
     updateCamera();
-    render();
+    render(daylightFactor(timestamp));
 
     if (timestamp - lastSyncedAt > POSITION_SYNC_INTERVAL) {
         syncPosition();
@@ -540,7 +821,12 @@ fetch('api/world.php')
     .then((data) => {
         state = data;
         nonSolidTypes = new Set(data.rules.nonSolidTypes);
+        transparentTypes = new Set(data.rules.transparentTypes);
         doorTypes = new Set(data.rules.doorTypes);
+        lightEmission = data.rules.lightEmission ?? {};
+        surfaceLine = data.surfaceLine ?? [];
+        inventory = data.player.inventory ?? {};
+        gameMode = data.player.mode ?? 'survival';
 
         player = {
             x: data.player.x,
@@ -550,6 +836,8 @@ fetch('api/world.php')
             onGround: false,
         };
 
+        buildShadeCache();
+        computeLight();
         showSelection();
         updateCamera();
 

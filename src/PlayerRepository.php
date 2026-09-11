@@ -47,7 +47,12 @@ final class PlayerRepository
             throw new RuntimeException('Unsupported player format version.');
         }
 
-        return new Player((float) $data['x'], (float) $data['y']);
+        return new Player(
+            (float) $data['x'],
+            (float) $data['y'],
+            new Inventory($data['inventory'] ?? []),
+            GameMode::from($data['mode'] ?? GameMode::Survival->value),
+        );
     }
 
     private function ensureDirectoryExists(): void

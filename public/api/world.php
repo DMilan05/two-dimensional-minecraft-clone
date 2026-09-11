@@ -13,6 +13,7 @@ $player = $context['playerProvider']->loadOrCreate($world);
 
 echo json_encode([
     'world' => $world->toArray(),
+    'surfaceLine' => $context['worldProvider']->getSurfaceLine(),
     'player' => $player->toArray(),
     'rules' => GameRules::toArray(),
 ], JSON_THROW_ON_ERROR);

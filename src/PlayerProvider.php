@@ -35,7 +35,7 @@ final class PlayerProvider
         $x = $spawnX + (1 - GameRules::PLAYER_WIDTH) / 2;
         $y = $surfaceY - GameRules::PLAYER_HEIGHT;
 
-        return new Player($x, $y);
+        return new Player($x, $y, new Inventory(), GameMode::Survival);
     }
 
     /**

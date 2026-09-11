@@ -42,7 +42,15 @@ final class WorldGenerator
     private const TRUNK_MAX_HEIGHT = 6;
     private const CANOPY_RADIUS = 2;
 
-    public function generate(World $world): void
+    /**
+     * Returns the surface row of every column. That line is the boundary
+     * between "outdoors" and "underground", and it has to be remembered: once
+     * the player digs a shaft, nothing in the grid itself can tell you where
+     * the ground originally was.
+     *
+     * @return int[]
+     */
+    public function generate(World $world): array
     {
         $baseSurfaceY = (int) ($world->getHeight() * self::SURFACE_RATIO);
         $surface = $this->buildSurfaceMap($world, $baseSurfaceY);
@@ -51,6 +59,8 @@ final class WorldGenerator
         $this->carveCaves($world, $surface);
         $this->layBedrock($world);
         $this->plantTrees($world, $surface);
+
+        return $surface;
     }
 
     /**

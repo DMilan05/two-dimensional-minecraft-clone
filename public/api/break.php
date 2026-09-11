@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use Voxel\BlockType;
-use Voxel\World;
 
 $context = require __DIR__ . '/bootstrap.php';
 
@@ -45,8 +44,22 @@ if ($target->isDoor()) {
 $world->setBlock($x, $y, BlockType::Air);
 $changes[] = ['x' => $x, 'y' => $y, 'type' => BlockType::Air->value];
 
+// Creative players are not collecting anything, so nothing drops.
+if (!$player->getMode()->isCreative()) {
+    $drop = $target->drop();
+
+    if ($drop !== null) {
+        $player->getInventory()->add($drop);
+    }
+}
+
 $changes = array_merge($changes, $context['fallingBlocks']->settleColumn($world, $x));
 
-$context['worldRepository']->save($world);
+$context['worldRepository']->saveChanges($world, $changes);
+$context['playerRepository']->save($player);
 
-respond(200, ['changes' => $changes]);
+respond(200, [
+    'changes' => $changes,
+    'inventory' => $player->getInventory()->toArray(),
+    'mode' => $player->getMode()->value,
+]);

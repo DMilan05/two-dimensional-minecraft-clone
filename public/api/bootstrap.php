@@ -80,7 +80,7 @@ function readCoordinates(array $input): array
     return [$x, $y];
 }
 
-$worldRepository = new WorldRepository(DATA_DIR . '/world.json');
+$worldRepository = new WorldRepository(DATA_DIR . '/world');
 $worldProvider = new WorldProvider($worldRepository, new WorldGenerator(), WORLD_WIDTH, WORLD_HEIGHT);
 
 $playerRepository = new PlayerRepository(DATA_DIR . '/player.json');
